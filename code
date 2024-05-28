@@ -1,0 +1,1035 @@
+#include <iostream>
+#include <string>
+#include <vector>
+#include <cstdio>
+#include <string>
+#include <sstream>
+#include <iomanip>
+#include <direct.h>
+#include <io.h>
+#include <fstream>
+#include <limits>
+#include <stack>
+#include <algorithm>
+using namespace std ;
+const int inf = 0x3f3f3f3f;
+
+struct Window {
+    float xMin, xMax;
+    float yMin, yMax;
+    float zMin, zMax;
+    float wMin, wMax;
+};
+struct vectors{
+    float x;
+    float y;
+    float z;
+    float w;
+};
+
+struct Tables {
+	string name;
+	string pathName;
+	vector<string>colName;//列名称
+	vector<string>type;
+	vector<int>size;
+	string indexFilePath; // 索引文件路径
+	FILE* fp;
+};
+
+class myDBMS {
+	vector<Tables*>tab;
+	bool open;
+
+public:
+	string cmd;
+	string prePath;//数据库的文件路径
+	vector<string> logLines;       // 存储日志文件每一行的容器
+
+	myDBMS() {
+		cmd = "";
+		prePath = "";
+		open = false;
+		//建库删库,建表删表,增删改查
+		cout << "请按以下规则输入命令语句(命令不分大小写)" << endl;
+		cout << "新建数据库: create database 数据库名字" << endl;
+		cout << "删除数据库: drop database 数据库名字" << endl;
+		cout << "打开数据库: open database 数据库名字" << endl;
+		cout << "关闭数据库: close database 数据库名字" << endl;
+		cout << "添加新表  : create table  表名" << endl;
+		cout << "            (" << endl;
+		cout << "            列1(字段)名 数据类型1(大小)," << endl;
+		cout << "            列2(字段)名 数据类型2(大小)," << endl;
+		cout << "            …          …" << endl;
+		cout << "            )" << endl;
+		cout << "删除旧表  : drop table 表名" << endl;
+		cout << "将csv文件数据插入表: loadcsv csv文件路径 表名" <<endl;
+		cout << "查询数据  : query 表名 窗口参数" << endl;
+		cout << "插入      : insert into 表名(field1,field2,…) values(value1,value2,…)" << endl;
+		cout << "修改      : update 列名 = 新值 from 表名 where 列名 = 值" << endl;
+		cout << "删除      : delete from 表名 where 列名 = 值" << endl;
+		cout << "回滚     : rollabck" <<endl;
+		cout << "退出程序  : exit" << endl;
+	}
+	~myDBMS() {
+		for (int i = 0; i < tab.size(); i++) {
+			if (tab[i]->fp != NULL)
+				fclose(tab[i]->fp);
+			delete tab[i];
+		}
+		tab.resize(0);
+		cmd = "";
+		prePath = "";
+	}
+
+	void transfer();//转为小写
+	void openDataBase(string);//打开数据库
+	void closeDataBase();//关闭数据库
+	void myCreateDataBase(string); //建立数据库	
+	void myDropDataBase(string); //删除数据库	
+	void myCreateTable(string); //创建表
+	void myDropTable(string); //删除表
+	void myInsert(string,string); //插入数据
+	void myDelete(string,string); //删除数据
+	void myUpdate(string, string, string, string); //更新数据
+	void myQuery(string, Window); //查询数据
+    void myQueryIndex(string tableName, Window queryWindow);//根据索引文件查询数据
+    void loadCSVToTable(string csvFilePath, string tableName);                            // 将csv数据写入数据库
+    void logTransaction(const string& operation, const string& content, string fileName); // 操作日志文件
+    int posIsNos(string);//辅助函数
+	int getLineNumber(string);
+    void rollbackWriteOperation(const string &fileName);
+    void rollbackUpdateOperation(const std::string &fileName, const std::string &colName, const std::string &oldValue, const std::string &newValue);
+    void rollbackLastOperation(const string &logFilePath);
+};
+
+void myDBMS::transfer() {
+	for (int i = 0; i < cmd.size(); i++) 
+		cmd[i] = tolower(cmd[i]);
+}
+
+void myDBMS::openDataBase(string dataBaseName) {
+	if (open) {
+		cout << "请先关闭当前打开的数据库" << endl;
+		return;
+	}
+	string pathName = "C:\\Users\\27761\\Desktop\\MyDBMS\\" + dataBaseName;
+	if (0 != access(pathName.c_str(), 0))printf("该数据库不存在");
+	else {
+		prePath = pathName + "\\";
+		cout << "打开数据库成功" << endl;
+		open = true;
+	}
+}
+
+void myDBMS::closeDataBase() {//和析构函数相同
+	for (int i = 0; i < tab.size(); i++) {
+		if (tab[i]->fp != NULL)
+			fclose(tab[i]->fp);
+		delete tab[i];
+	}
+	tab.resize(0);
+	cmd = "";
+	prePath = "";
+	open = false;
+}
+
+void myDBMS::myCreateDataBase(string dataBaseName) {//建立数据库
+	string pathName = "C:\\Users\\27761\\Desktop\\MyDBMS\\" + dataBaseName;
+	if (0 != access(pathName.c_str(), 0)) {
+		if (0 == mkdir(pathName.c_str()))//返回0表示创建成功,-1表示失败
+			cout << "创建成功" << endl;
+		else
+			cout << "创建失败" << endl;
+		return;
+	}
+	cout << "该数据库已存在" << endl;
+}
+
+void myDBMS::loadCSVToTable(string csvFilePath, string tableName){
+   // 首先, 检查表是否存在并获取其结构.
+    int tableIndex = posIsNos(tableName);
+    if(tableIndex == -1) {
+        cout << "Table '" << tableName << "' does not exist." << endl;
+        return;
+    }
+
+    Tables* table = tab[tableIndex]; // 获取表的结构
+
+    // 打开CSV文件.
+    ifstream csvFile(csvFilePath);
+    if(csvFile.fail()) {
+        cout << "Failed to open the CSV file." << endl;
+        return;
+    }
+
+    string line;
+    // 读取CSV文件的每一行.
+    while(getline(csvFile, line)) {
+        // 将 CSV 中的逗号替换成空格，以符合 myInsert 需要的格式
+        for (char& ch : line) {
+            if (ch == ',') ch = ' ';
+        }
+
+        // 调用 myInsert 函数插入数据
+        myInsert(tableName, line);
+    }
+
+    // 关闭文件
+    csvFile.close();
+
+    cout << "CSV data loaded into table '" << tableName << "'" << endl;
+}
+
+void myDBMS::myDropDataBase(string dataBaseName) {//删除数据库
+	string pathName = "C:\\Users\\27761\\Desktop\\MyDBMS\\" + dataBaseName;
+	if (0 == access(pathName.c_str(), 0)) {
+		pathName = "rd " + pathName;
+		if (0 == system(pathName.c_str()))
+			cout << "删除数据库" << dataBaseName << "成功" << endl;
+		else
+			cout << "删除数据库" << dataBaseName << "失败" << endl;
+		return;
+	}
+	cout << "数据库" << dataBaseName << "不存在" << endl;
+}
+
+void myDBMS::myCreateTable(string tableName) {//建立表
+	vector<string>colName;
+    vector<string>type;
+    vector<int>size;
+    string tmp;
+    getchar();
+    getline(cin, tmp);
+    getline(cin, tmp);
+    while (tmp != ")") {
+        stringstream ss(tmp);
+        string x;
+        ss >> x; colName.push_back(x);
+        ss >> x;
+        int pos = x.find('(');
+        if (pos == string::npos) {
+            type.push_back(x);
+            size.push_back(1);
+        }
+        else {
+            type.push_back(x.substr(0, pos));
+            int num = 0;
+            for (int i = pos + 1; i < x.length() - 1; i++) 
+                num = num * 10 + x[i] - '0';
+            size.push_back(num);
+        }
+        getline(cin, tmp);
+    }
+
+    string tableFileName = tableName + ".txt";
+    string tableFilePath = prePath + tableFileName;
+
+    // 检查表文件是否已经存在
+    if (0 != access(tableFilePath.c_str(), 0)) {
+        Tables* ptr = new Tables;
+        ptr->name = tableName;
+        ptr->pathName = tableFilePath;
+        ptr->colName = colName;
+        ptr->type = type;
+        ptr->size = size;
+        ptr->fp = fopen(tableFilePath.c_str(), "w");
+        
+        // 写入列名，类型和大小到表文件
+        string wrin;
+        wrin.clear();
+        for (int i = 0; i < colName.size(); i++)
+            wrin += colName[i] + ";" + type[i] + ";" + to_string(size[i]) + ";";
+        wrin += "\n";
+        fprintf(ptr->fp, wrin.c_str());
+        fclose(ptr->fp);
+
+        // 同时创建索引文件
+        string indexFileName = tableName + "_index.txt";
+        string indexFilePath = prePath + indexFileName;
+        FILE* indexFilePtr = fopen(indexFilePath.c_str(), "w");
+        if (indexFilePtr != nullptr) { // 确保索引文件创建成功
+           fclose(indexFilePtr); // 索引文件初始为空
+        }
+
+        // 更新Tables对象结构体，包括索引文件路径
+        // 注意：这里假设Tables结构体已经增加了indexFilePath字段用于存储索引文件路径
+        ptr->indexFilePath = indexFilePath;
+
+        tab.push_back(ptr);
+        cout << "创建新表和索引文件成功!" << endl;
+        return;
+    }
+    cout << "该表已经存在!" << endl;
+}
+
+void myDBMS::myDropTable(string tableName) {//删除表
+	tableName += ".txt";
+	string pathName = prePath + tableName;
+	if (0 != access(pathName.c_str(), 0))
+		cout << "该表不存在!" << endl;
+	else {
+		for (int i = 0; i < tab.size(); i++)
+			if (tab[i]->name == tableName) {
+				if (tab[i]->fp != NULL)
+					fclose(tab[i]->fp);
+				delete tab[i];
+				tab.erase(tab.begin() + i);
+			}
+		remove(pathName.c_str());
+		cout << "删除成功!" << endl;
+	}
+    string tableindexname=prePath+tableName+"_index.txt";
+    if (0 != access(tableindexname.c_str(), 0))
+		cout << "索引不存在!" << endl;
+	else {
+		for (int i = 0; i < tab.size(); i++)
+			if (tab[i]->name == tableName) {
+				if (tab[i]->fp != NULL)
+					fclose(tab[i]->fp);
+				delete tab[i];
+				tab.erase(tab.begin() + i);
+			}
+		remove(tableindexname.c_str());
+	}
+}
+
+int myDBMS::posIsNos(string tableName) {
+	string pathName = prePath + tableName + ".txt";
+	if (0 != access(pathName.c_str(), 0)) {
+		cout << "该表不存在!" << endl;
+		return -1;
+	}
+	FILE* tempfptr = fopen(pathName.c_str(), "r");
+	char contant[100];
+	fscanf(tempfptr, "%s", contant);
+	string tmp = contant;
+	for (int i = 0; i < tmp.size(); i++)
+		if (tmp[i] == ';')
+			tmp[i] = ' ';
+	stringstream check(tmp);
+	string x, y, z;
+	Tables* nxt = new Tables;
+	nxt->name = tableName;
+	while (check >> x) {
+		check >> y >> z;
+		nxt->colName.push_back(x);
+		nxt->type.push_back(y);
+		nxt->size.push_back(atoi(z.c_str()));
+	}
+	nxt->pathName = pathName;
+	tab.push_back(nxt);
+	fclose(tempfptr);
+	return tab.size() - 1;
+}
+
+void myDBMS::myInsert(string tableName,string value) {//插入数据
+	 if (!open) {
+        cout << "无选中数据库!" << endl;
+        return;
+    }
+    int pos = inf;
+    for (int i = 0; i < tab.size(); i++) {
+        if (tab[i]->name == tableName) {
+            pos = i; break;
+        }
+    }
+    if (pos == inf) 
+        pos = posIsNos(tableName);
+    if (pos == -1) return;
+    
+    stringstream ss(value);
+    string tmp2; ss >> tmp2;
+    tab[pos]->fp = fopen(tab[pos]->pathName.c_str(), "a");
+    if (tab[pos]->fp == nullptr) {
+        cout << "文件打开失败！可能是因为文件路径错误或没有操作权限。" << endl;
+        return; // 直接返回，不继续执行后续操作
+    }
+    
+    // 插入数据同时记录下索引值（在此示例中，索引值为x）
+    float x; // 假设索引列是double类型
+    
+    for (int i = 0; i < tab[pos]->type.size(); i++) {
+    string tmp = tab[pos]->type[i];
+    if (tmp == "int") {
+        int value; ss >> value;
+		x=value;
+        fprintf(tab[pos]->fp, "%d", value);
+    }
+    else if (tmp == "float") {
+        float value; ss >> value;
+		x=value;
+        fprintf(tab[pos]->fp, "%f", value);
+    }
+    else if (tmp == "double") {
+        double value; ss >> value;
+		x=value;
+        fprintf(tab[pos]->fp, "%f", value);
+    }
+    else if (tmp == "char") {
+        if (tab[pos]->size[i] == 1) {
+            char value; ss >> value;
+			x=value;
+            fprintf(tab[pos]->fp, "%c", value);
+        }
+        else {
+            int cnt = tab[pos]->size[i];
+            char* value = new char[cnt + 1]; // 加1以确保字符串以空字符终结
+            ss >> std::noskipws; // 关闭跳过空白的行为以正确读取包含空格的字符串
+            for(int charIndex = 0; charIndex < cnt; ++charIndex) {
+                ss >> value[charIndex]; // 读取字符
+            }
+            value[cnt] = '\0'; // 确保字符串正确结束
+            ss >> std::skipws; // 恢复跳过空白的默认行为
+            fprintf(tab[pos]->fp, "%s", value);
+            delete[] value; // 使用delete[]来释放分配给字符数组的内存
+        }
+    }
+    // 在每个值后面添加逗号分隔符，但不包括最后一项
+    if (i != tab[pos]->type.size() - 1)
+        fprintf(tab[pos]->fp, ",");
+}
+    fprintf(tab[pos]->fp, "%c", '\n');
+    fclose(tab[pos]->fp);
+    
+    // 更新索引文件
+	string indexFileName = tableName + "_index.txt";
+	string indexFilePath = prePath + indexFileName;
+	//cout<<indexFilePath;
+    //string indexPath = tab[pos]->indexFilePath; 
+    FILE* indexFp = fopen(indexFilePath.c_str(), "a");  // 打开索引文件
+    
+    if (indexFp == nullptr) {
+        cout << "索引文件打开失败!" << endl;
+    } else {
+        // 获取行号。这里假设您有一种方法能够获取到当前插入行的行号。
+        int lineNumber = getLineNumber(tab[pos]->pathName); 
+        fprintf(indexFp, "%f, %d\n", x, lineNumber);
+        fclose(indexFp);
+    }
+    
+    cout << "插入成功!" << endl;
+	logTransaction("write", value, tableName+".txt");
+}
+
+int myDBMS::getLineNumber(string tableFilePath) {
+    // 提供一种方法来获取当前的行号
+    std::ifstream file(tableFilePath);
+    if (!file.is_open()) {
+        std::cerr << "无法打开文件: " << tableFilePath << std::endl;
+        return -1; // Could not open the file.
+    }
+
+    int lineNumber = 0;
+    std::string line;
+
+    // Get the first line containing the metadata.
+    std::getline(file, line);
+
+    // Count the number of lines following the metadata line.
+    while (std::getline(file, line)) {
+        ++lineNumber;
+    }
+
+    file.close();
+    return lineNumber;
+}
+
+void myDBMS::rollbackWriteOperation(const string &fileName) {
+    // 构造文件完整路径
+    string fullFilePath = prePath + fileName;
+	cout <<fullFilePath;
+    // 创建临时 vector 来存储文件的所有行，除了最后一行
+    vector<string> lines;
+    ifstream inputFile(fullFilePath);
+    string line;
+    while (getline(inputFile, line)) {
+        lines.push_back(line);
+    }
+    inputFile.close();
+    
+    if (!lines.empty()) {
+        // 移除 vector 的最后一个元素，即最后写入的行
+        lines.pop_back();
+        
+        // 重新写入文件，不包括最后一行
+        ofstream outputFile(fullFilePath);
+        for (const auto& line : lines) {
+            outputFile << line << "\n";
+        }
+        outputFile.close();
+        cout << "撤销成功，最近的写入操作已被回滚。" << endl;
+    } else {
+        cout << "文件是空的，没有可以撤销的写入操作。" << endl;
+    }
+}
+
+void myDBMS::rollbackUpdateOperation(const std::string &fileName, const std::string &colName, const std::string &oldValue, const std::string &newValue) {
+    std::string fullFilePath = prePath + fileName;
+    std::ifstream inputFile(fullFilePath);
+    std::string line;
+    std::vector<std::string> lines;
+    std::vector<std::string> tokens;
+    std::string delimiter = ",";
+    size_t pos = 0;
+    int colIndex = -1;
+
+    // 根据colName确定列的索引
+    if (colName == "x") colIndex = 0;
+    else if (colName == "y") colIndex = 1;
+    else if (colName == "z") colIndex = 2;
+    else if (colName == "w") colIndex = 3;
+
+    if (colIndex == -1) {
+        std::cout << "列名" << colName << "不正确。" << std::endl;
+        return;
+    }
+
+    // 逐行读取文件内容，进行处理
+    while (std::getline(inputFile, line)) {
+        std::stringstream ss(line);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            tokens.push_back(item);
+        }
+
+        // 如果找到新值，则替换为旧值
+        if (tokens[colIndex] == newValue) {
+            tokens[colIndex] = oldValue;
+        }
+
+        // 重新组合行
+        std::ostringstream oss;
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << tokens[i];
+        }
+
+        lines.push_back(oss.str());
+        tokens.clear(); // 清空tokens，为下一行的解析做准备
+    }
+    inputFile.close();
+
+    // 将更新后的内容写回文件
+    std::ofstream outputFile(fullFilePath);
+    if (!outputFile.is_open()) {
+        std::cout << "无法打开文件以写入：" << fileName << std::endl;
+        return;
+    }
+
+    for (const std::string &updatedLine : lines) {
+        outputFile << updatedLine << std::endl;
+    }
+
+    outputFile.close();
+
+    std::cout << "更新操作已回滚。" << std::endl;
+}
+
+void myDBMS::rollbackLastOperation(const string &logFilePath) {
+    std::stack<std::string> lines; // Create a stack to hold the lines
+    std::ifstream logFile(logFilePath); // Open the log file
+    std::string line;
+
+    if (!logFile.is_open()) {
+        std::cout << "无法打开日志文件。" << std::endl;
+        return;
+    }
+
+    // Push each line of the file onto the stack
+    while (std::getline(logFile, line)) {
+        lines.push(line);
+    }
+    logFile.close();
+
+    // Check if there is at least one line in the stack
+    if (!lines.empty()) {
+        const std::string &lastLogEntry = lines.top();
+        std::cout << "最后一行: " << lastLogEntry << std::endl;
+        
+        std::stringstream logStream(lastLogEntry);
+        std::string timestamp, fileName, operationType;
+		std::string colname, oldValue, newValue;
+        std::getline(logStream, timestamp, ',');
+        std::getline(logStream, fileName, ',');
+        std::getline(logStream, operationType, ',');
+          
+        if (operationType == "write") {
+            rollbackWriteOperation(fileName);
+        }
+		else if(operationType == "update"){
+			std::getline(logStream, colname, ',');
+			std::getline(logStream, oldValue, ',');
+            std::getline(logStream, newValue, ',');
+            rollbackUpdateOperation(fileName, colname, oldValue, newValue);
+		}
+		lines.pop();
+        std::ofstream logFileOut(logFilePath);
+        if (!logFileOut.is_open()) {
+            std::cout << "无法打开日志文件以更新内容。" << std::endl;
+            return;
+        }
+        while (!lines.empty()) {
+            logFileOut << lines.top() << std::endl;
+            lines.pop();
+        }
+        logFileOut.close();
+            
+    } else if (lines.size() == 1) {
+        std::ofstream logFileOut(logFilePath, std::ofstream::trunc);
+        logFileOut.close();
+        std::cout << "日志文件只有一个条目，现已清空。" << std::endl;
+		
+    } else {
+        std::cout << "日志文件为空。" << std::endl;
+    }
+}
+
+void myDBMS::myDelete(string tableName,string isWhere) {//删除数据
+	if (!open) {
+        cout << "无选中数据库!" << endl;
+        return;
+    }
+    int pos = inf;
+    for (int i = 0; i < tab.size(); i++) {
+        if (tab[i]->name == tableName) {
+            pos = i; break;
+        }
+    }
+    if (pos == inf)
+        pos = posIsNos(tableName);
+    if (pos == -1) return;
+
+    stringstream ss(isWhere);
+    string typeName, toValue, whr, deng;
+	cout << "解析得到的 toValue: [" << toValue << "]" << endl;
+    ss >> whr >> typeName >> deng >> toValue;
+    
+    string pathName2 = prePath + "tmp.txt";
+    ofstream tmpFile(pathName2);
+    ifstream inputFile(tab[pos]->pathName);
+    
+    string line;
+    getline(inputFile, line); // 读取第一行（可能是标题）
+    tmpFile << line << "\n"; // 将标题写入临时文件
+    vector<string> deletedRows;
+    // 读取并处理数据
+    while (getline(inputFile, line)) {
+        stringstream lineStream(line);
+        string cell;
+        vector<string> cells;
+        while (getline(lineStream, cell, ',')) {
+            cells.push_back(cell);
+        }
+        
+        // 查找是否有匹配的列名
+        int wherePos = -1;
+        for (int i = 0; i < tab[pos]->colName.size(); i++) {
+            if (tab[pos]->colName[i] == typeName) {
+                wherePos = i;
+                break;
+            }
+        }
+        if (wherePos == -1 || wherePos >= cells.size()) {
+            cout << "字段错误或不存在！" << endl;
+            return;
+        }
+        
+        if (cells[wherePos] != toValue) {
+			cout << "待比较值: [" << cells[wherePos] << "] vs [" << toValue << "]" << endl;
+            tmpFile << line << "\n"; // 如果当前行不匹配，则写入临时文件
+        }
+
+		if (cells[wherePos] == toValue) {
+            // 如果该行的条件匹配，则该行将被删除，所以保存该行数据
+            deletedRows.push_back(line);
+        }
+    }
+    
+    tmpFile.close();
+    inputFile.close();
+
+    //cout<<"删除原始文件并重命名更新后的临时文件";
+    remove(tab[pos]->pathName.c_str());
+    if (rename(pathName2.c_str(), tab[pos]->pathName.c_str()) == 0) {
+        cout << "删除成功!" << endl;
+        // 调用更新索引文件函数（如果需要）
+        // updateIndexFile(tableName);
+    } else {
+        cout << "删除失败!" << endl;
+    }
+	for (const string& row : deletedRows) {
+        //logTransaction("delete", row, tableName + ".txt");
+    }
+}
+
+void myDBMS::myUpdate(string tableName, string toColName,string newValue, string isWhere) {//更新数据
+	if (!open) {
+        cout << "无选中数据库!" << endl;
+        return;
+    }
+    int pos = inf;
+    for (int i = 0; i < tab.size(); i++) {
+        if (tab[i]->name == tableName) {
+            pos = i; break;
+        }
+    }
+    if (pos == inf)
+        pos = posIsNos(tableName);
+    if (pos == -1) return;
+
+    stringstream ss(isWhere);
+    int wherePos = inf, updatePos = inf;
+    string whereTypeName, whereValue, whr, deng;
+    ss >> whr >> whereTypeName >> deng >> whereValue;
+    for (int i = 0; i < tab[pos]->colName.size(); i++) //找到范围对应的colName下标
+        if (tab[pos]->colName[i] == whereTypeName) {
+            wherePos = i;
+            break;
+        }
+    for (int i = 0; i < tab[pos]->colName.size(); i++) //找到需要修改的colName下标
+        if (tab[pos]->colName[i] == toColName) {
+            updatePos = i;
+            break;
+        }
+    if (wherePos == inf || updatePos == inf) {
+        cout << "列名不存在！" << endl;
+        return;
+    }
+
+    string pathName2 = prePath + "tmp.txt";
+    ofstream tmpFile(pathName2);
+    ifstream inputFile(tab[pos]->pathName);
+
+    string line;
+	string oldValue;
+	string logContent;
+    getline(inputFile, line); //读取标题
+    tmpFile << line << "\n"; //写入标题
+
+    vector<string> rowValues; //存储每行的数据
+    while (getline(inputFile, line)) {
+        stringstream lineStream(line);
+        string cell;
+        rowValues.clear();
+
+        // 解析行数据
+        while (getline(lineStream, cell, ',')) {
+            rowValues.push_back(cell);
+        }
+
+        // 检查条件和确定需要更新的列
+        if (rowValues.size() > wherePos && rowValues[wherePos] == whereValue) {
+            if (rowValues.size() > updatePos) {
+				oldValue = rowValues[updatePos];
+                rowValues[updatePos] = newValue; // 更新值
+
+				if (oldValue != newValue) { // 仅当旧值和新值不同时记录
+                    logContent += toColName + ","+ oldValue + "," + newValue;
+                }
+
+            }
+        }
+
+        // 将数据写回临时文件
+        for (size_t i = 0; i < rowValues.size(); i++) {
+            tmpFile << rowValues[i];
+            if (i < rowValues.size() - 1) tmpFile << ",";
+        }
+        tmpFile << "\n";
+    }
+    
+    tmpFile.close();
+    inputFile.close();
+
+    // 删除原始文件，重命名更新后的文件
+    remove(tab[pos]->pathName.c_str());
+    if (rename(pathName2.c_str(), tab[pos]->pathName.c_str()) == 0) {
+        cout << "更新成功!" << endl;
+    } else {
+        cout << "更新失败!" << endl;
+    }
+	logTransaction("update", logContent, tableName +".txt");
+}
+
+void myDBMS::myQuery(string tableName, Window queryWindow) {
+    if (!open) {
+        cout << "无选中数据库!" << endl;
+        return;
+    }
+    int comparisonCount = 0;
+    // 寻找表
+    int pos = inf;
+    for (int i = 0; i < tab.size(); i++) {
+        if (tab[i]->name == tableName) {
+            pos = i; break;
+        }
+    }
+    if (pos == inf) pos = posIsNos(tableName);
+    if (pos == -1) return;
+    
+    // 打开文件
+    ifstream file(tab[pos]->pathName);
+    if (!file.is_open()) {
+        cout << "文件打开失败！" << endl;
+        return;
+    }
+
+     string line;
+    while (getline(file, line)) {
+        float x, y, z, w;
+        stringstream ss(line);
+
+        char delimiter;
+        ss >> x >> delimiter >> y >> delimiter >> z >> delimiter >> w;
+
+        // 检查每个字段是否位于窗口内，并记录比较次数
+        if (x >= queryWindow.xMin) comparisonCount++;
+        if (x <= queryWindow.xMax) comparisonCount++;
+        if (y >= queryWindow.yMin) comparisonCount++;
+        if (y <= queryWindow.yMax) comparisonCount++;
+        if (z >= queryWindow.zMin) comparisonCount++;
+        if (z <= queryWindow.zMax) comparisonCount++;
+        if (w >= queryWindow.wMin) comparisonCount++;
+        if (w <= queryWindow.wMax) comparisonCount++;
+
+        if (x >= queryWindow.xMin && x <= queryWindow.xMax &&
+            y >= queryWindow.yMin && y <= queryWindow.yMax &&
+            z >= queryWindow.zMin && z <= queryWindow.zMax &&
+            w >= queryWindow.wMin && w <= queryWindow.wMax) {
+            // 按格式输出符合范围的记录
+            cout << fixed << setprecision(6)
+                 << left << setw(15) << x
+                 << left << setw(15) << y
+                 << left << setw(15) << z
+                 << left << setw(15) << w << endl;
+        }
+    }
+
+    file.close();
+
+    // 输出总比较次数
+    cout << "查询总次数: " << comparisonCount << endl;
+}
+
+void myDBMS::myQueryIndex(string tableName, Window queryWindow) {
+    if (!open) {
+            cout << "无选中数据库!" << endl;
+            return;
+        }
+        int comparisonCount = 0;
+
+        // 寻找表
+        int pos = inf;
+        for (int i = 0; i < tab.size(); i++) {
+            if (tab[i]->name == tableName) {
+                pos = i; break;
+            }
+        }
+        if (pos == inf) pos = posIsNos(tableName);
+        if (pos == -1) return;
+        
+        string dataPath = tab[pos]->pathName;
+        string basePath = dataPath.substr(0, dataPath.find_last_of(".")); // 删除".txt"
+        string indexPath = basePath + "_index.txt"; // 添加"_index.txt"
+        
+        ifstream indexFile(indexPath);
+		//cout<<indexPath;
+
+        if (!indexFile.is_open()) {
+            cout << "索引文件打开失败！" << endl;
+            return;
+        }
+
+        // 读取并处理索引文件，寻找符合条件的行号
+        vector<int> relevantLineNumbers;
+        string indexLine;
+        while (getline(indexFile, indexLine)) {
+            stringstream indexSS(indexLine);
+            float wValue;
+            int lineNumber;
+            char delimiter;
+
+            indexSS >> wValue >> delimiter >> lineNumber;
+
+            comparisonCount++;  // w value comparison with wMin
+            if (wValue >= queryWindow.wMin) {
+                comparisonCount++;  // w value comparison with wMax
+                if (wValue <= queryWindow.wMax) {
+                    relevantLineNumbers.push_back(lineNumber);
+                }
+            }
+        }
+        indexFile.close();
+
+        // 根据索引获取数据并检查是否符合其他条件
+        ifstream file(tab[pos]->pathName);
+        if (!file.is_open()) {
+            cout << "文件打开失败！" << endl;
+            return;
+        }
+
+        int currentLine = 1; // 当前行号
+        string line;
+        while (getline(file, line)) {
+            if (find(relevantLineNumbers.begin(), relevantLineNumbers.end(), currentLine) != relevantLineNumbers.end()) {
+                float x, y, z, w;
+                stringstream ss(line);
+                char delimiter;
+
+                ss >> x >> delimiter >> y >> delimiter >> z >> delimiter >> w;
+
+                if (x >= queryWindow.xMin && x <= queryWindow.xMax &&
+                    y >= queryWindow.yMin && y <= queryWindow.yMax &&
+                    z >= queryWindow.zMin && z <= queryWindow.zMax &&
+                    w >= queryWindow.wMin && w <= queryWindow.wMax) {
+                    // 仅当行对应索引文件中指定的行时，才输出满足条件的记录
+                    cout << fixed << setprecision(6)
+                         << left << setw(15) << x
+                         << left << setw(15) << y
+                         << left << setw(15) << z
+                         << left << setw(15) << w << endl;
+                }
+                // 如果在索引中找到了行号，我们就不再对这4个字段进行比较计数，因为已经检查过w的条件了
+            }
+            currentLine++;
+        }
+
+        file.close();
+
+        // 输出总比较次数
+        cout << "查询总次数: " << comparisonCount << endl;
+}
+
+void myDBMS::logTransaction(const string& operation, const string& content, string fileName) {
+    // 定义日志文件的存储路径
+    string logFilePath = "C://Users//27761//Desktop//MyDBMS//test//database_transction.log"; // 请替换为实际路径
+
+    // 打开日志文件，以追加模式
+    ofstream logFile(logFilePath, ios::app);
+    if (!logFile.is_open()) {
+        cerr << "无法打开或创建日志文件：" << logFilePath << endl;
+        return;
+    }
+
+
+    // 获取当前时间
+    time_t now = time(0);
+    tm* ltm = localtime(&now);
+    
+    // 生成时间戳
+    stringstream timeStamp;
+    timeStamp << (ltm->tm_year + 1900) << '.'
+              << setfill('0') << setw(2) << (ltm->tm_mon + 1) << '.'
+              << setfill('0') << setw(2) << ltm->tm_mday << ':'
+              << setfill('0') << setw(2) << ltm->tm_hour << ':'
+              << setfill('0') << setw(2) << ltm->tm_min << ':'
+              << setfill('0') << setw(2) << ltm->tm_sec;
+
+    // 写入操作内容到日志文件
+    logFile << timeStamp.str() << "," << fileName << "," << operation << "," << content << endl;
+
+    // 关闭日志文件
+    logFile.close();
+}
+
+int main(void) {
+	myDBMS db;
+	while (cin >> db.cmd) {
+		db.transfer();
+		//cout << "db.cmd = " << db.cmd << endl;
+		if (db.cmd == "exit")break;
+		if (db.cmd == "create") {
+			string name;
+			cin >> db.cmd >> name;
+			db.transfer();
+			//cout << "db.cmd:" << db.cmd << " name:" << name << endl;
+			if (db.cmd == "database")
+				db.myCreateDataBase(name);
+			else if (db.cmd == "table")
+				db.myCreateTable(name);
+			else cout << "命令语句有误!" << endl;
+		}
+		else if (db.cmd == "drop") {
+			string name;
+			cin >> db.cmd >> name;
+			db.transfer();
+			if (db.cmd == "database")
+				db.myDropDataBase(name);
+			else if (db.cmd == "table")
+				db.myDropTable(name);
+			else cout << "命令语句有误!" << endl;
+		}
+		else if (db.cmd == "open") {
+			string name;
+			cin >> db.cmd >> name;
+			db.openDataBase(name);
+		}
+		else if (db.cmd == "close") {
+			string name;
+			cin >> db.cmd >> name;
+			db.transfer();
+			if (db.cmd == "database")
+				db.closeDataBase();
+			else cout << "命令语句有误!" << endl;
+		}
+		else if (db.cmd == "insert") {
+			//insert into 表名(field1,field2,…) values(value1,value2,…)"
+			string value, name;
+			cin >> db.cmd >> name >> value;
+			vector<string>colName;
+			int pos = name.find('(');
+			for (int i = 0; i < value.length(); i++)
+				if (value[i] == ',' || value[i] == '(' || value[i] == ')')
+					value[i] = ' ';
+			db.myInsert(name.substr(0, pos), value);
+		}
+		else if (db.cmd == "delete") {
+			//delete from 表名 where 范围
+			string name;
+			cin >> db.cmd >> name;
+			string isWhere;
+			getline(cin, isWhere);
+			db.myDelete(name, isWhere);
+		}
+		else if (db.cmd == "update") {
+			//update 列名 = 新值 from 表名 where 列名 = 值(值可为all, 表全部范围)
+			string toColName,deng, newValue, tableName, isWhere;
+			cin >> toColName >> deng >> newValue >> db.cmd >> tableName;
+			getline(cin, isWhere);
+			db.myUpdate(tableName, toColName, newValue, isWhere);
+		}
+		else if (db.cmd == "query") {
+			Window queryWindow;
+			string tableName;
+			cin >> tableName;
+			// 示例：获取并打印窗口参数，用于调试
+			cin >> queryWindow.xMin >> queryWindow.xMax >> queryWindow.yMin >> queryWindow.yMax >> queryWindow.zMin >> queryWindow.zMax >> queryWindow.wMin >> queryWindow.wMax;
+			cout << "查询表: " << tableName << "，窗口范围: x(" << queryWindow.xMin << ", " << queryWindow.xMax << "), y(" << queryWindow.yMin << ", " << queryWindow.yMax << "), z(" << queryWindow.zMin << ", " << queryWindow.zMax << "), w(" << queryWindow.wMin << ", " << queryWindow.wMax << ")" << endl;
+
+			// 请确保下面的函数调用是您的设计中的调用
+			cout << "不用索引，查询结果为："<<endl;
+			db.myQuery(tableName, queryWindow);
+			cout << "用索引，查询结果为："<<endl;
+			db.myQueryIndex(tableName, queryWindow);
+		}
+		else if (db.cmd == "loadcsv") {
+			string csvFilePath, tableName;
+            csvFilePath="C:\\Users\\27761\\Desktop\\nuaa2022\\16_filled.csv";
+			cin >> tableName;
+			cout<<tableName;
+			db.loadCSVToTable(csvFilePath, tableName); // 调用加载CSV到数据库表的方法
+		}
+		else if (db.cmd == "rollback") {
+			const string &logFilePath = "C://Users//27761//Desktop//MyDBMS//test//database_transction.log"; 
+		    db.rollbackLastOperation(logFilePath);
+		}
+
+		else {
+			string tmp;
+			getline(cin, tmp);
+			cout << "输入命令错误,请检查!" << endl;
+		}
+	}
+	return 0;
+}
